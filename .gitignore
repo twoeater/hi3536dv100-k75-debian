@@ -1,0 +1,28 @@
+# Vendor-provided or device-extracted material. Keep these local.
+/Hi3536D_V100R001C01SPC010/
+/ReleaseDoc/
+/digicap.dav
+/Firmware_*.zip
+/unpack/
+/backups/
+
+# User-supplied external inputs.  Keep only the usage document.
+/vendor/*
+!/vendor/README.md
+
+# Generated build trees and images.
+/debian/build/
+/debian/out/
+/release-assets/
+
+# Local publication checklist.
+/GITHUB_FILES.md
+
+# Python and editor by-products.
+**/__pycache__/
+*.py[cod]
+/.config
+*.log
+*.swp
+*~
+.DS_Store

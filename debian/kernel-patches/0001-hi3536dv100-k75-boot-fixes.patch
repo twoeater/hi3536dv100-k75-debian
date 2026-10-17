@@ -1,0 +1,92 @@
+# SPDX-License-Identifier: GPL-2.0-only
+# Applies to OpenIPC/linux commit 6b8ca794ec3e1e35ee260377443a6a729df27e91.
+
+diff --git a/arch/arm/boot/compressed/head.S b/arch/arm/boot/compressed/head.S
+--- a/arch/arm/boot/compressed/head.S
++++ b/arch/arm/boot/compressed/head.S
+@@ -114,7 +114,7 @@
+ #endif
+ 		.endm
+ 
+-		.section ".start", #alloc, #execinstr
++		.section ".start", "ax"
+ /*
+  * sort out different calling conventions
+  */
+diff --git a/arch/arm/boot/compressed/piggy.S b/arch/arm/boot/compressed/piggy.S
+--- a/arch/arm/boot/compressed/piggy.S
++++ b/arch/arm/boot/compressed/piggy.S
+@@ -1,4 +1,4 @@
+-	.section .piggydata,#alloc
++	.section .piggydata,"a"
+ 	.globl	input_data
+ input_data:
+ 	.incbin	"arch/arm/boot/compressed/piggy_data"
+diff --git a/arch/arm/include/debug/pl01x.S b/arch/arm/include/debug/pl01x.S
+--- a/arch/arm/include/debug/pl01x.S
++++ b/arch/arm/include/debug/pl01x.S
+@@ -27,7 +27,8 @@
+ #endif
+ 
+ 		.macro	senduart,rd,rx
+-		strb	\rd, [\rx, #UART01x_DR]
++		/* Hi3536DV100's APB bridge uses 32-bit UART register writes. */
++		str	\rd, [\rx, #UART01x_DR]
+ 		.endm
+ 
+ 		.macro	waituart,rd,rx
+diff --git a/arch/arm/mm/proc-v7.S b/arch/arm/mm/proc-v7.S
+--- a/arch/arm/mm/proc-v7.S
++++ b/arch/arm/mm/proc-v7.S
+@@ -557,7 +557,7 @@
+ 	string	cpu_elf_name, "v7"
+ 	.align
+ 
+-	.section ".proc.info.init", #alloc
++	.section ".proc.info.init", "a"
+ 
+ 	/*
+ 	 * Standard v7 proc info content
+diff --git a/drivers/phy/hibvt/phy-hisi-sata.c b/drivers/phy/hibvt/phy-hisi-sata.c
+--- a/drivers/phy/hibvt/phy-hisi-sata.c
++++ b/drivers/phy/hibvt/phy-hisi-sata.c
+@@ -19,6 +19,7 @@
+ #include <linux/delay.h>
+ #include <linux/io.h>
+ #include <linux/module.h>
++#include <linux/of.h>
+ #include <linux/phy/phy.h>
+ #include <linux/platform_device.h>
+ #include <mach/io.h>
+@@ -81,6 +82,19 @@ static int hisi_sata_phy_probe(struct platform_device *pdev)
+ 	struct resource *res;
+ 	struct phy *phy;
+ 	void __iomem *mmio;
++	u32 dt_phy_mode;
++
++	if (!of_property_read_u32(dev->of_node, "hisilicon,phy-mode",
++			&dt_phy_mode)) {
++		if (dt_phy_mode > PHY_MODE_3G) {
++			dev_err(dev, "invalid SATA PHY mode %u\n", dt_phy_mode);
++			return -EINVAL;
++		}
++		phy_mode = dt_phy_mode;
++	}
++
++	dev_info(dev, "SATA PHY mode: %s\n",
++		 phy_mode == PHY_MODE_1_5G ? "1.5Gbps" : "3.0Gbps");
+ 
+ 	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
+ 	if (!res) {
+diff --git a/scripts/dtc/dtc-lexer.l b/scripts/dtc/dtc-lexer.l
+--- a/scripts/dtc/dtc-lexer.l
++++ b/scripts/dtc/dtc-lexer.l
+@@ -38,7 +38,7 @@ LINECOMMENT	"//".*\n
+ #include "srcpos.h"
+ #include "dtc-parser.tab.h"
+ 
+-YYLTYPE yylloc;
++extern YYLTYPE yylloc;
+ extern bool treesource_error;
+ 
+ /* CAUTION: this will stop working if we ever use yyless() or yyunput() */

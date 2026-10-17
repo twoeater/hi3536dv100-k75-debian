@@ -1,0 +1,163 @@
+#!/bin/busybox sh
+# SPDX-License-Identifier: GPL-2.0-only
+set -eu
+
+BB=/bin/busybox
+export PATH=/bin:/sbin:/usr/bin:/usr/sbin
+
+# BusyBox mdev defaults character devices to 0660 when no matching rule is
+# present.  Programs such as apt intentionally drop privileges and still need
+# the standard data/sink devices to be world-readable and world-writable.
+fix_standard_device_permissions()
+{
+    for device_name in null zero full random urandom tty ptmx; do
+        device_path=/dev/$device_name
+        if [ -c "$device_path" ]; then
+            "$BB" chmod 0666 "$device_path"
+        fi
+    done
+}
+
+$BB mkdir -p /dev /proc /sys /run /newroot
+$BB mount -t proc proc /proc 2>/dev/null || true
+$BB mount -t sysfs sysfs /sys 2>/dev/null || true
+$BB mount -t tmpfs tmpfs /run 2>/dev/null || true
+
+# 원래 Hi3536DV100 full_defconfig에는 DEVTMPFS가 없다. 지원되는 커널에서는
+# devtmpfs를 쓰고, 그렇지 않으면 tmpfs + BusyBox mdev로 장치 노드를 만든다.
+use_mdev=0
+if ! $BB mount -t devtmpfs devtmpfs /dev 2>/dev/null; then
+    $BB mount -t tmpfs -o mode=0755,nosuid tmpfs /dev
+    $BB mknod -m 0600 /dev/console c 5 1
+    $BB mknod -m 0666 /dev/null c 1 3
+    use_mdev=1
+fi
+$BB mkdir -p /dev/pts
+$BB mount -t devpts devpts /dev/pts 2>/dev/null || true
+if [ "$use_mdev" -eq 1 ]; then
+    echo /sbin/mdev > /proc/sys/kernel/hotplug 2>/dev/null || true
+    /sbin/mdev -s
+fi
+fix_standard_device_permissions
+
+# 현재 커널이 선택한 UART를 그대로 쓰도록 가상 console 장치를 우선한다.
+for uart_console in /dev/console /dev/ttyS0 /dev/ttyAMA0; do
+    if [ -c "$uart_console" ]; then
+        exec <"$uart_console" >"$uart_console" 2>&1
+        break
+    fi
+done
+
+echo
+echo 'digicap Debian initramfs: rootfs 검색을 시작합니다.'
+
+root_transport=any
+break_before_root=0
+for cmdline_arg in $($BB cat /proc/cmdline); do
+    case "$cmdline_arg" in
+        digicap.root_transport=*)
+            root_transport=${cmdline_arg#digicap.root_transport=}
+            ;;
+        digicap.break_before_root=1)
+            break_before_root=1
+            ;;
+    esac
+done
+case "$root_transport" in
+    any|usb|sata) ;;
+    *)
+        echo "경고: 지원하지 않는 root transport '$root_transport'; any를 사용합니다."
+        root_transport=any
+        ;;
+esac
+
+# Hikvision의 서명된 순정 커널에는 USB 저장장치 드라이버가 내장되어 있지만
+# ext4는 빠져 있다. 동일한 4.9.37 소스/설정으로 만든 모듈을 순서대로 적재한다.
+module_dir=/lib/modules/4.9.37
+for module_name in mbcache jbd2 ext4; do
+    module_path="$module_dir/$module_name.ko"
+    if [ -f "$module_path" ]; then
+        if "$BB" insmod "$module_path"; then
+            echo "커널 모듈 적재: $module_name"
+        else
+            echo "경고: 커널 모듈 적재 실패: $module_name"
+        fi
+    fi
+done
+
+if [ "$break_before_root" -eq 1 ]; then
+    echo 'digicap 진단 셸: 아직 어떤 파티션도 마운트하지 않았습니다.'
+    echo '계속 rootfs를 검색하려면 exit를 입력하십시오.'
+    "$BB" sh
+fi
+
+candidate_allowed()
+{
+    [ "$root_transport" = any ] && return 0
+
+    candidate_name=${1#/dev/}
+    candidate_sys_path=$($BB readlink -f "/sys/class/block/$candidate_name" \
+        2>/dev/null || true)
+    case "$root_transport:$candidate_sys_path" in
+        usb:*/*/usb*/*) return 0 ;;
+        sata:*/ata[0-9]*/*) return 0 ;;
+    esac
+    return 1
+}
+
+root_device=
+attempt=0
+while [ "$attempt" -lt 60 ]; do
+    if [ "$use_mdev" -eq 1 ]; then
+        /sbin/mdev -s 2>/dev/null || true
+        fix_standard_device_permissions
+    fi
+    for candidate in /dev/sd[a-z][0-9]* /dev/mmcblk[0-9]p[0-9]* /dev/nvme[0-9]n[0-9]p[0-9]*; do
+        [ -b "$candidate" ] || continue
+        candidate_allowed "$candidate" || continue
+        if $BB mount -t ext4 -o rw,noatime "$candidate" /newroot 2>/dev/null; then
+            if [ -f /newroot/.digicap-debian-root ]; then
+                root_device=$candidate
+                break 2
+            fi
+            $BB umount /newroot
+        fi
+    done
+    attempt=$((attempt + 1))
+    $BB sleep 1
+done
+
+if [ -z "$root_device" ]; then
+    echo '오류: .digicap-debian-root 마커가 있는 ext4 파티션을 찾지 못했습니다.'
+    echo '진단: /bin/busybox dmesg; /bin/busybox cat /proc/partitions'
+    echo '장치를 확인한 뒤 exit를 입력하면 커널 패닉으로 재부팅할 수 있습니다.'
+    exec "$BB" sh
+fi
+
+echo "Debian rootfs 발견: $root_device"
+if [ -f /newroot/swapfile ]; then
+    "$BB" swapon /newroot/swapfile 2>/dev/null || echo '경고: swapfile 활성화 실패'
+fi
+
+# USB가 예전 빌드로 준비됐어도 최신 첫 부팅 절차를 적용한다.
+if [ -x /newroot/firstboot ] && [ -x /digicap-firstboot ]; then
+    "$BB" cp /digicap-firstboot /newroot/firstboot
+    "$BB" chmod 0755 /newroot/firstboot
+fi
+
+for mount_name in dev proc sys run; do
+    $BB mkdir -p "/newroot/$mount_name"
+    $BB mount --move "/$mount_name" "/newroot/$mount_name"
+done
+
+if [ -x /newroot/firstboot ]; then
+    next_init=/firstboot
+elif [ -x /newroot/sbin/init ]; then
+    next_init=/sbin/init
+else
+    echo '오류: rootfs에 /firstboot 또는 /sbin/init이 없습니다.'
+    exec "$BB" sh
+fi
+
+echo "Debian으로 전환: $next_init"
+exec "$BB" switch_root /newroot "$next_init"

@@ -1,0 +1,50 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-2.0-only
+set -eu
+
+export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+if [ -c /dev/console ]; then
+    exec </dev/console >/dev/console 2>&1
+elif [ -c /dev/ttyS0 ]; then
+    exec </dev/ttyS0 >/dev/ttyS0 2>&1
+elif [ -c /dev/ttyAMA0 ]; then
+    exec </dev/ttyAMA0 >/dev/ttyAMA0 2>&1
+else
+    echo '사용 가능한 콘솔 장치를 찾지 못했습니다.' >&2
+    exit 1
+fi
+
+mkdir -p /dev/pts /proc /run /sys
+mountpoint -q /dev || mount -t devtmpfs devtmpfs /dev
+mountpoint -q /dev/pts || mount -t devpts devpts /dev/pts
+mountpoint -q /proc || mount -t proc proc /proc
+mountpoint -q /sys || mount -t sysfs sysfs /sys
+mountpoint -q /run || mount -t tmpfs tmpfs /run
+
+echo
+echo 'Debian ARM 2단계 설치를 시작합니다.'
+/debootstrap/debootstrap --second-stage
+
+printf 'digicap-debian\n' > /etc/hostname
+ln -sf /usr/share/zoneinfo/Asia/Seoul /etc/localtime
+printf 'C.UTF-8 UTF-8\n' > /etc/locale.gen
+locale-gen
+
+if ! grep -q '^T0:' /etc/inittab; then
+    printf '\nT0:23:respawn:/sbin/agetty -L ttyAMA0 115200 vt100\n' >> /etc/inittab
+fi
+
+if ! id debian >/dev/null 2>&1; then
+    adduser --disabled-password --gecos '' debian
+    adduser debian sudo
+fi
+
+echo
+echo 'debian 사용자의 새 암호를 설정하세요.'
+passwd debian
+
+rm -f /usr/sbin/policy-rc.d /firstboot
+echo
+echo '설치가 끝났습니다. SysV init으로 전환합니다.'
+exec /sbin/init
